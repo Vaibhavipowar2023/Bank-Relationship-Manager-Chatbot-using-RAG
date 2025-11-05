@@ -5,19 +5,33 @@ from rag_pipeline import handle_query, load_or_create_vectorstore, build_vectors
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
-# Ensure vectorstore is loaded on startup
+# ---------------------------------------------------------------------
+#  Load or rebuild FAISS vectorstore at runtime (lightweight startup)
+# ---------------------------------------------------------------------
 try:
-    load_or_create_vectorstore()
+    print("🔹 Checking for existing FAISS index...")
+    db = load_or_create_vectorstore()
+    if not db:
+        print("⚠️ No FAISS index found — building new one.")
+        build_vectorstore(force_rebuild=True)
+    else:
+        print("✅ FAISS index loaded successfully.")
 except Exception as e:
-    # Print the error but allow app to start so you can debug.
-    print("Warning: vector store load/create failed on startup:", str(e))
+    print(f"⚠️ Warning: could not load vectorstore — will rebuild on first query. ({e})")
+
+# ---------------------------------------------------------------------
+#  Routes
+# ---------------------------------------------------------------------
 
 @app.route("/")
 def index():
+    """Render the chatbot UI."""
     return render_template("index.html")
+
 
 @app.route("/api/query", methods=["POST"])
 def api_query():
+    """Handle chat queries from the frontend."""
     data = request.get_json(force=True)
     q = data.get("q", "").strip()
     if not q:
@@ -25,27 +39,33 @@ def api_query():
 
     try:
         result = handle_query(q)
-        # Standardize return so front-end can parse
         return jsonify({"ok": True, "query": q, "result": result})
     except Exception as e:
-        # Return error message (avoid leaking secrets)
+        # Avoid leaking stack traces or secrets
         return jsonify({"ok": False, "error": str(e)}), 500
+
 
 @app.route("/api/rebuild_index", methods=["POST"])
 def api_rebuild_index():
-    # This endpoint should be protected in production (auth). For dev it's open.
+    """Force a rebuild of the FAISS index (for dev use only)."""
     try:
-        db = build_vectorstore(force_rebuild=True)
-        return jsonify({"ok": True, "message": "FAISS index rebuilt", "docs_loaded": getattr(db, "index", "unknown")})
+        build_vectorstore(force_rebuild=True)
+        return jsonify({"ok": True, "message": "FAISS index rebuilt successfully."})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-# Static files route if needed (Flask serves static by default from static/)
+
 @app.route("/static/<path:path>")
 def send_static(path):
+    """Serve static files (Flask default)."""
     return send_from_directory("static", path)
 
+
+# ---------------------------------------------------------------------
+#  Run app
+# ---------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     debug = os.getenv("FLASK_DEBUG", "1") == "1"
+    print(f"🚀 Starting Flask server on port {port}")
     app.run(host="0.0.0.0", port=port, debug=debug)
