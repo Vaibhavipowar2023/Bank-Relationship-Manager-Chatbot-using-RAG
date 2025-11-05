@@ -1,4 +1,4 @@
-# Python
+# Python cache
 __pycache__/
 *.pyc
 
@@ -7,12 +7,12 @@ __pycache__/
 env/
 venv/
 
-# Environment / keys
+# Sensitive files
 .env
 
-# Data embeddings
+# Large data / embeddings
 embeddings/
 
-# OS / Editor junk
+# OS junk
 .DS_Store
 Thumbs.db
