@@ -13,4 +13,6 @@ fastapi
 uvicorn
 pandas 
 numpy
+duckduckgo_search
+
 
