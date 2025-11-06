@@ -8,7 +8,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
 
 # If you keep a local builder, import it, but we won't run it unless allowed
-from retriever import build_vectorstore  # your existing function
+from retriever import build_vectorstore  
 
 from tools.interest_rate_tool import get_interest_rates
 from tools.forex_tool import get_fx_rate
