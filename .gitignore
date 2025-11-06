@@ -10,8 +10,7 @@ venv/
 # Sensitive files
 .env
 
-# Large data / embeddings
-embeddings/
+
 
 # OS junk
 .DS_Store
