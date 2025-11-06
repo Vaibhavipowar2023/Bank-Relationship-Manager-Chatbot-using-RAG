@@ -11,3 +11,6 @@ gunicorn
 requests
 fastapi
 uvicorn
+pandas 
+numpy
+
