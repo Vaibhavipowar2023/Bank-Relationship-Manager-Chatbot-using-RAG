@@ -1,23 +1,53 @@
-# rag_pipeline.py
+# rag_pipeline.py (safer for Render Free)
 import os
 import json
+from typing import Optional
+
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
-from retriever import build_vectorstore
+
+# If you keep a local builder, import it, but we won't run it unless allowed
+from retriever import build_vectorstore  # your existing function
+
 from tools.interest_rate_tool import get_interest_rates
 from tools.forex_tool import get_fx_rate
 from tools.web_search_tool import web_search
 
-# --- Load environment ---
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise EnvironmentError("OPENAI_API_KEY not set. Please export it before running.")
+# ---------------- Config & Paths ----------------
+# Where the prebuilt FAISS artifacts live. On Render, mount a disk to /var/data
+ARTIFACT_DIR = os.getenv("ARTIFACT_DIR", "embeddings")
+INDEX_DIR = os.path.join(ARTIFACT_DIR, "faiss_index")  # directory produced by FAISS.save_local(...)
+ALLOW_INDEX_BUILD = os.getenv("ALLOW_INDEX_BUILD", "0") == "1"  # default: DON'T build on server
 
-# --- Initialize LLM ---
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=OPENAI_API_KEY)
+OPENAI_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")  # small = cheaper/lighter
 
-# --- Prompt template ---
+# ---------------- Lazy singletons ----------------
+_llm: Optional[ChatOpenAI] = None
+_embeddings: Optional[OpenAIEmbeddings] = None
+_VECTOR_DB = None  # cached FAISS
+
+def _get_openai_key() -> str:
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        # Don't explode at import-time; raise only on first real use
+        raise EnvironmentError("OPENAI_API_KEY not set.")
+    return key
+
+def _get_llm() -> ChatOpenAI:
+    global _llm
+    if _llm is None:
+        _llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0, openai_api_key=_get_openai_key())
+    return _llm
+
+def _get_embeddings() -> OpenAIEmbeddings:
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = OpenAIEmbeddings(model=EMBED_MODEL, openai_api_key=_get_openai_key())
+    return _embeddings
+
+# ---------------- Prompt & chain ----------------
 prompt = PromptTemplate(
     input_variables=["context", "question"],
     template=(
@@ -31,41 +61,53 @@ prompt = PromptTemplate(
     ),
 )
 
-# ✅ Runnable pipeline replaces deprecated LLMChain
-rag_chain = prompt | llm
+def _get_rag_chain():
+    # Build chain lazily so we don't construct LLM until needed
+    return prompt | _get_llm()
 
-# ✅ Cache FAISS vectorstore
-VECTOR_DB = None
-
+# ---------------- Vector store loader ----------------
 def load_or_create_vectorstore():
-    global VECTOR_DB
-    if VECTOR_DB is not None:
-        return VECTOR_DB
+    """
+    Load a prebuilt FAISS index. If it's missing:
+      - Build only if ALLOW_INDEX_BUILD=1 (dangerous on 512MB).
+      - Otherwise raise a clear error so you can prebuild offline.
+    """
+    global _VECTOR_DB
+    if _VECTOR_DB is not None:
+        return _VECTOR_DB
 
-    print("Loading FAISS vectorstore...")
+    print(f"Loading FAISS vectorstore from: {INDEX_DIR}")
     try:
-        embeddings = OpenAIEmbeddings()
-        VECTOR_DB = FAISS.load_local("embeddings/faiss_index", embeddings, allow_dangerous_deserialization=True)
+        _VECTOR_DB = FAISS.load_local(
+            INDEX_DIR,
+            _get_embeddings(),
+            allow_dangerous_deserialization=True,
+        )
         print("FAISS index loaded successfully.")
-    except Exception:
-        print("FAISS index not found — building from CSVs (first-time setup).")
-        VECTOR_DB = build_vectorstore(force_rebuild=True)
-    return VECTOR_DB
+        return _VECTOR_DB
+    except Exception as e:
+        print("FAISS load failed:", e)
 
+        if not ALLOW_INDEX_BUILD:
+            # Do NOT build on server by default
+            raise RuntimeError(
+                "FAISS index not found. Prebuild it offline and place it under "
+                f"{INDEX_DIR}. Or set ALLOW_INDEX_BUILD=1 (not recommended on low-RAM dynos)."
+            )
 
-# --- Helper: convert tool data to natural language ---
+        print("FAISS index not found — building from CSVs (server build allowed).")
+        _VECTOR_DB = build_vectorstore(force_rebuild=True)
+        return _VECTOR_DB
+
+# ---------------- Helpers ----------------
 def format_tool_output(tool_result):
-    """Convert any structured result to a readable English sentence."""
     if tool_result is None:
         return "No data available."
 
-    # If it's already a string, return it
     if isinstance(tool_result, str):
         return tool_result
 
-    # Try to extract common patterns
     if isinstance(tool_result, dict):
-        # Handle our interest rate structure
         data = tool_result.get("data") or {}
         if data:
             if isinstance(data, dict):
@@ -73,10 +115,8 @@ def format_tool_output(tool_result):
                 return " ".join(parts) + "."
             if isinstance(data, list):
                 return ", ".join(map(str, data))
-        # Generic flattening
         return " ".join(f"{k}: {v}" for k, v in tool_result.items() if v and k != "status")
 
-    # Handle list of dicts (e.g. web search)
     if isinstance(tool_result, list):
         summaries = []
         for item in tool_result[:3]:
@@ -87,18 +127,16 @@ def format_tool_output(tool_result):
                 summaries.append(str(item))
         return " ".join(summaries)
 
-    # Fallback to JSON string
     return json.dumps(tool_result, indent=2)
 
-
-# --- Main RAG answer function ---
+# ---------------- Core RAG ----------------
 def answer_with_rag(query, k=4):
-    """Retrieve relevant info from FAISS + use LLM to answer."""
     db = load_or_create_vectorstore()
     retriever = db.as_retriever(search_kwargs={"k": k})
     docs = retriever.invoke(query)
 
     context = "\n---\n".join([d.page_content for d in docs]) if docs else ""
+    rag_chain = _get_rag_chain()
     resp = rag_chain.invoke({"context": context, "question": query})
     response_text = getattr(resp, "content", str(resp)).strip()
 
@@ -116,10 +154,8 @@ def answer_with_rag(query, k=4):
         "retrieved_docs": [d.metadata for d in docs],
     }
 
-
-# --- Main router ---
+# ---------------- Router ----------------
 def handle_query(query):
-    """Route query between RAG, tools, and web search."""
     rag_result = answer_with_rag(query)
 
     if rag_result["needs_real_time"]:
