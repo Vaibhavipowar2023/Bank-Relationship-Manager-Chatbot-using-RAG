@@ -9,10 +9,11 @@ langchain-openai
 python-dotenv
 gunicorn
 requests
-fastapi
-uvicorn
-pandas 
+pandas
 numpy
-duckduckgo_search
-
-
+duckduckgo-search
+tiktoken
+sentence-transformers
+transformers
+scikit-learn
+torch
